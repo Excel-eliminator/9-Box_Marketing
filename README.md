@@ -1,2 +1,5 @@
-# 9-Box_Marketing
-Performance
+streamlit
+pandas
+numpy
+plotly
+openpyxl
