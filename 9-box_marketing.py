@@ -6,6 +6,13 @@ import io
 
 st.set_page_config(page_title="Marketing 9-Box Chart", layout="wide")
 
+# Role labels: how clearly a person's work can be traced to P&L rows
+ROLE_DIRECT = "Direct Brand Owner"
+ROLE_CATEGORY = "Category Owner"
+ROLE_PILLAR = "Pillar / Common"
+ROLE_SHARED = "Shared Service"
+LEGACY_SS_PCT = 0.10  # original Shared Service pool, used only as the Legacy baseline in the impact table
+
 # ==========================================
 # HEADER
 # ==========================================
@@ -17,7 +24,7 @@ st.markdown("""
             📊 Marketing Performance 9-Box Chart
         </h2>
         <p style="margin: 0.2rem 0 0 0; opacity: 0.9; font-size: 1rem;">
-            Strategic Financial Output vs People Score (Proportional Allocation Matrix)
+            Strategic Financial Output vs People Score (Fair Tiered Attribution Matrix)
         </p>
     </div>
 """, unsafe_allow_html=True)
@@ -129,10 +136,39 @@ try:
         )
     with col_cfg3:
         shared_service_pct = st.number_input(
-            "Shared Service Overhead Allocation (%)",
-            min_value=0.0, max_value=100.0, value=10.0, step=1.0,
-            help="Percentage of the Total Active Marketing Scope allocated to the 'Shared Service' team."
+            "Shared Service Credit (% of Total Marketing Scope)",
+            min_value=0.0, max_value=100.0, value=5.0, step=1.0,
+            help="Share of the Total Active Marketing Scope credited to the 'Shared Service' team (split equally) "
+                 "and deducted from direct owners. 0% = no P&L credit. The original (Legacy) default was 10%."
         ) / 100.0
+
+    # FAIR ALLOCATION SETTINGS
+    st.markdown("#### ⚖️ Fair Allocation Settings")
+    alloc_method = st.radio(
+        "Allocation Method:",
+        ["Fair - Tiered Attribution (Recommended)", "Legacy - Equal Split"],
+        horizontal=True,
+        help="Fair: credit follows how clearly the work is traceable to the P&L. "
+             "Legacy: every claimant on a row gets an equal share (original behavior)."
+    )
+    fair_mode = alloc_method.startswith("Fair")
+
+    if fair_mode:
+        cw1, cw2, cw3 = st.columns(3)
+        with cw1:
+            w_direct = st.slider("Direct Brand Owner weight (%)", 0, 100, 100, 5,
+                                 help="Person explicitly mapped to the brand on the row.") / 100.0
+        with cw2:
+            w_cat = st.slider("Category Owner weight (%)", 0, 100, 100, 5,
+                              help="Person mapped to the row's category (no explicit brand).") / 100.0
+        with cw3:
+            w_pillar = st.slider("Pillar-only (Common) weight (%)", 0, 100, 25, 5,
+                                 help="Person mapped only by pillar, with no brand or category. "
+                                      "Their work on a row is shared/unclear, so it earns less credit.") / 100.0
+        pillar_for_all = False
+    else:
+        w_direct = w_cat = w_pillar = 1.0
+        pillar_for_all = True
 
     # COLLAPSIBLE README METHODOLOGY
     with st.expander("📖 View Engine Methodology & Rules (README)"):
@@ -145,28 +181,35 @@ try:
         A common data issue arises when drawing data solely based on broad Categories or Pillars because they may contain items managed by other divisions (e.g., the "Others" pillar).
         *Rule:* The engine utilizes a **Master Brand Filter**. It extracts only the explicit Brands listed in the `Matrix`. Any row in the `PL_Local` raw dataset belonging to a brand *not* explicitly listed is immediately **scoped out** and excluded. 
 
-        **2. Pillar & Category Inclusion via Master Brand Intersection**
-        Personnel mapped strictly by "Pillar" or "Category" (without explicit brands) act as "Passengers" in the data distribution.
-        *Rule:* They will only receive a financial allocation IF the specific Brand inside their Pillar/Category successfully passes the Master Brand whitelist check (meaning the brand is explicitly managed by someone else on the team). This ensures they receive credit for relevant products without accidentally absorbing unmanaged items from the wider P&L population.
+        **2. Tiered Attribution (Direct > Category > Pillar-only)**
+        Every in-scope P&L row is matched to the people who can credibly claim it, and each claim carries a weight depending on how traceable the person's work is:
+        *Direct Brand Owner* (explicit brand on the row, default 100%), *Category Owner* (explicit category, default 100%), and *Pillar-only / Common* (mapped by pillar with no brand or category, default 25%).
+        A person's pillar label **only creates a claim for pillar-only roles**. Brand and category owners no longer absorb other people's brands just because they sit in the same pillar. If someone matches a row through several tiers, the most specific tier applies.
 
         **3. Absolute Population Inclusion (Returns act as Deductions)**
         *Rule:* All mapped items are evaluated exactly as they appear in the raw P&L data. Negative values and Sales Returns are mathematically forced to act as absolute deductions (`Gross - absolute(Return)`) ensuring the final output perfectly mirrors the actual P&L net financial reality without artificially inflating sales.
 
-        **4. Shared Service Overhead Allocation**
-        Administrative and shared service personnel do not handle specific brands but support the entire marketing department.
-        *Rule:* The engine calculates the Grand Total Active Marketing Scope. A configurable percentage (default 10%) of this grand total forms the "Shared Service Overhead". This pool is then divided equally among all personnel explicitly designated with the "Shared Service" pillar label in the `Matrix` sheet.
+        **4. Shared Service Credit**
+        Shared service personnel support the whole department, so their work cannot be traced to specific brands.
+        *Rule:* A configurable percentage of the Grand Total Active Marketing Scope (default 5%, down from the legacy 10%) is credited to Shared Service and split equally among them. Only this amount is deducted from direct owners. Set it to 0% for no P&L credit.
 
-        **5. Proportional Headcount Allocation (Anti-Double Counting)**
-        When multiple core marketing personnel are assigned to the same Brand, Category, or Pillar, standard summation would lead to inflated, double-counted financial metrics.
-        *Rule:* After deducting the Shared Service Overhead (Step 4), the remaining value of any given transaction row is equally divided among the `N` core marketing personnel actively handling it. Rows not mapped to any personnel are excluded entirely, ensuring a 100% accurate financial reflection without double counting.
+        **5. Weighted Allocation (Anti-Double Counting)**
+        *Rule:* After the Shared Service deduction, each row is divided among its claimants in proportion to their tier weights (`weight / sum of weights`), never equally by headcount. The row is always fully allocated once, so there is no double counting and nothing is lost. Rows with no claimant are excluded.
 
-        **6. Dynamic Y-Axis Scaling (Adjusted People Score 1-10)**
-        Users can toggle between the standard `People Score (1-3)` and the `Adjusted People Score (1-10)`. 
-        *Rule:* The adjusted score is calculated using a continuous mathematical formula integrating PA averages and WLA multipliers: `=ROUND((PA Average/5)*7 + WLA_Bonus, 2)`. Where WLA Low = 0, Mid = 1.5, High = 3.0. This prevents visual overlapping on the scatter plot and provides granular performance differentiation.
+        **6. Anchored Y-Axis Scaling (Adjusted People Score 1-10)**
+        Users can toggle between the standard `People Score (1-3)` and the `Adjusted People Score (1-10)`.
+        *Rule:* The adjusted score is **anchored on the original People Score**. The 1-10 scale is split into one equal band per original score (1, 1.5, 2, 2.5, 3 = five bands of 1.8 points), and the PA average only decides where a person sits **inside** their band (`(PA - 1) / 4`, with a 10% margin kept clear at each band edge). This spreads people who share the same original score and prevents overlapping bubbles, while guaranteeing that a higher original score can never end up with a lower adjusted score.
+        The default thresholds are the same policy on both scales: Low below 1.75 / High from 2.5 on the 1-3 scale, which equals Low below 4.6 / High from 6.4 on the 1-10 scale. A **Sync Check** warns if the loaded scores contradict each other.
 
         **7. Operating Profit Cap (Adjusted Contribution Margin)**
         Contribution Margin is utilized as the primary financial indicator for X-Axis placement. However, evaluating solely on gross margin can overlook severe operational inefficiencies.
         *Rule:* If the "Adjusted Contribution Margin" metric is selected, the engine scans the net Operating Profit. If a personnel's Operating Profit is strictly negative (< 0), their Adjusted Contribution Margin is mathematically hard-capped just below the Low-Med X-Axis threshold. This ensures personnel generating operational losses are automatically reclassified into the bottom financial tier regardless of how large their gross margin is.
+
+        **8. Threshold Calibration (Fair mode)**
+        The default X-Axis thresholds are derived from Direct Brand Owners and Category Owners only, so Pillar-only and Shared Service roles cannot shift the Low/Mid/High cut-offs for everyone else.
+
+        **9. Legacy Mode & Impact Comparison**
+        Selecting *Legacy - Equal Split* reproduces the original behavior (equal split, pillar label applies to everyone); set Shared Service Credit to 10% to match the original pool. In Fair mode, the *Fairness Impact* table shows each person's Legacy vs Fair numbers.
         """)
 
     # 3. READ MATRIX & BUILD STRICT MARKETING SCOPE
@@ -174,6 +217,8 @@ try:
     persons = []
     shared_service_persons = []
     global_active_brands = set()
+    score_lookup = {}   # name -> (score_normal, score_adj)
+    role_lookup = {}    # name -> role label (drives fairness weighting)
 
     for idx, row in df_mat_raw.iterrows():
         try:
@@ -204,14 +249,25 @@ try:
         brands = [str(x).strip().lower() for x in row[3:9] if pd.notna(x) and str(x).strip() != '']
         categories = [str(x).strip().lower() for x in row[9:15] if pd.notna(x) and str(x).strip() != '']
 
+        score_lookup[name] = (ps_normal, ps_adj)
+
         if pillar == 'shared service':
             shared_service_persons.append({'name': name, 'score_normal': ps_normal, 'score_adj': ps_adj})
+            role_lookup[name] = ROLE_SHARED
         else:
             clean_brands = list(set([b for b in brands if b != 'nan']))
             clean_cats = list(set([c for c in categories if c != 'nan']))
 
             # Anchor ALL mapped brands into the Master Brand list
             global_active_brands.update(clean_brands)
+
+            # Role = how clearly this person's work can be traced to P&L rows
+            if clean_brands:
+                role_lookup[name] = ROLE_DIRECT
+            elif clean_cats:
+                role_lookup[name] = ROLE_CATEGORY
+            else:
+                role_lookup[name] = ROLE_PILLAR
 
             persons.append({
                 'name': name,
@@ -227,89 +283,98 @@ try:
     df_explicit = df_pl[mask_explicit]
     explicit_sales = df_explicit['Calc_Sales'].sum()
 
-    # 4. PROPORTIONAL CALCULATION (Strict Master Brand Anchor & Anti-Leakage)
-    person_totals = {
-        p['name']: {'Sales': 0.0, 'CM': 0.0, 'OP': 0.0, 'Score_Normal': p['score_normal'], 'Score_Adj': p['score_adj']}
-        for p in persons}
+    # Aggregate the in-scope P&L once (allocation only depends on brand/category/pillar,
+    # so this is mathematically identical to row-by-row but much faster)
+    df_scope = (
+        df_explicit
+        .groupby(['Match_Brand', 'Match_Category', 'Match_Pillar'], as_index=False)
+        .agg(Brand=('Brand', 'first'), Category=('Category', 'first'),
+             Sales=('Calc_Sales', 'sum'), CM=(col_cm, 'sum'), OP=(col_op, 'sum'))
+    )
 
-    total_marketing_sales = 0.0
-    total_marketing_cm = 0.0
-    total_marketing_op = 0.0
-    breakdown_data = []
+    # 4. TIERED ATTRIBUTION ENGINE
+    def classify_match(p, brand, category, pillar, pillar_for_all):
+        """Return the tier through which person p can claim a P&L row (None = no claim)."""
+        if brand in p['brands']:
+            return 'Direct'
+        if category in p['categories']:
+            return 'Category'
+        # Pillar label is only a claim for pillar-only (common) roles, unless legacy mode is on
+        pillar_eligible = pillar_for_all or (not p['brands'] and not p['categories'])
+        if pillar_eligible and p['pillar'] and p['pillar'] == pillar:
+            return 'Pillar'
+        return None
 
-    # Core multiplier ensures the total sum does not inflate beyond actuals
-    core_multiplier = 1.0
-    if shared_service_persons:
-        core_multiplier = 1.0 - shared_service_pct
 
-    for idx, row in df_pl.iterrows():
-        sales = row['Calc_Sales']
-        row_brand = row['Match_Brand']
-        row_category = row['Match_Category']
-        row_pillar = row['Match_Pillar']
+    def run_allocation(w_direct, w_cat, w_pillar, pillar_for_all, ss_pct):
+        tier_weight = {'Direct': w_direct, 'Category': w_cat, 'Pillar': w_pillar}
+        totals = {p['name']: {'Sales': 0.0, 'CM': 0.0, 'OP': 0.0} for p in persons}
+        t_sales = t_cm = t_op = 0.0
+        breakdown = []
 
-        # SCOPE-OUT: Master Brand Filter. Exclude brands not explicitly handled by marketing.
-        if row_brand not in global_active_brands:
-            continue
+        # Share of the total scope credited to Shared Service (deducted from direct owners).
+        ss_eff = ss_pct if shared_service_persons else 0.0
+        core_mult = 1.0 - ss_eff
 
-        # Determine which marketing personnel handle this specific row
-        covered_by = []
-        for p in persons:
-            is_match = False
-            if p['pillar'] and p['pillar'] == row_pillar:
-                is_match = True
-            elif row_brand in p['brands']:
-                is_match = True
-            elif row_category in p['categories']:
-                is_match = True
+        for r in df_scope.itertuples(index=False):
+            claims = []
+            for p in persons:
+                tier = classify_match(p, r.Match_Brand, r.Match_Category, r.Match_Pillar, pillar_for_all)
+                if tier:
+                    claims.append((p['name'], tier))
+            if not claims:
+                continue
 
-            if is_match:
-                covered_by.append(p['name'])
+            weights = [tier_weight[t] for _, t in claims]
+            total_w = sum(weights)
+            if total_w <= 0:  # safety net: all claimants weighted 0 -> fall back to equal split
+                weights = [1.0] * len(claims)
+                total_w = float(len(claims))
 
-        N = len(covered_by)
+            t_sales += r.Sales
+            t_cm += r.CM
+            t_op += r.OP
 
-        # SCOPE-IN: Distribute proportionally among the assigned personnel
-        if N > 0:
-            cm = row[col_cm]
-            op = row[col_op]
+            for (name, _), w in zip(claims, weights):
+                share = w / total_w
+                totals[name]['Sales'] += r.Sales * core_mult * share
+                totals[name]['CM'] += r.CM * core_mult * share
+                totals[name]['OP'] += r.OP * core_mult * share
 
-            total_marketing_sales += sales
-            total_marketing_cm += cm
-            total_marketing_op += op
-
-            for name in covered_by:
-                person_totals[name]['Sales'] += (sales * core_multiplier) / N
-                person_totals[name]['CM'] += (cm * core_multiplier) / N
-                person_totals[name]['OP'] += (op * core_multiplier) / N
-
-            # Audit Trail for Active Scope Breakdown (SALES ONLY)
-            ss_allocation = sales * shared_service_pct if shared_service_persons else 0.0
-            core_allocation = sales * core_multiplier
-
-            breakdown_data.append({
-                'Brand': row['Brand'],
-                'Category': row['Category'],
-                'PL Original Sales (Gross - Return)': sales,
-                'System Core Allocation': core_allocation,
-                'Shared Service Allocation': ss_allocation,
-                'Covered By': ", ".join(sorted(covered_by))
+            breakdown.append({
+                'Brand': r.Brand,
+                'Category': r.Category,
+                'PL Original Sales (Gross - Return)': r.Sales,
+                'System Core Allocation': r.Sales * core_mult,
+                'Shared Service Allocation': r.Sales * ss_eff,
+                'Covered By': ", ".join(sorted(f"{n} [{t}]" for n, t in claims))
             })
 
-    # 5. ALLOCATE SHARED SERVICE POOL
-    if shared_service_persons:
-        ss_count = len(shared_service_persons)
-        ss_sales = (total_marketing_sales * shared_service_pct) / ss_count
-        ss_cm = (total_marketing_cm * shared_service_pct) / ss_count
-        ss_op = (total_marketing_op * shared_service_pct) / ss_count
+        # Shared Service pool: equal split, but only the credited portion (ss_eff)
+        if shared_service_persons:
+            ss_count = len(shared_service_persons)
+            for p in shared_service_persons:
+                totals[p['name']] = {
+                    'Sales': t_sales * ss_eff / ss_count,
+                    'CM': t_cm * ss_eff / ss_count,
+                    'OP': t_op * ss_eff / ss_count
+                }
 
-        for p in shared_service_persons:
-            person_totals[p['name']] = {
-                'Sales': ss_sales,
-                'CM': ss_cm,
-                'OP': ss_op,
-                'Score_Normal': p['score_normal'],
-                'Score_Adj': p['score_adj']
-            }
+        return totals, t_sales, t_cm, t_op, breakdown, ss_eff
+
+
+    # 5. RUN THE SELECTED METHOD (+ legacy baseline for the impact comparison)
+    person_totals_raw, total_marketing_sales, total_marketing_cm, total_marketing_op, breakdown_data, ss_eff_used = \
+        run_allocation(w_direct, w_cat, w_pillar, pillar_for_all, shared_service_pct)
+
+    person_totals = {
+        name: {**vals, 'Score_Normal': score_lookup[name][0], 'Score_Adj': score_lookup[name][1]}
+        for name, vals in person_totals_raw.items()
+    }
+
+    legacy_totals = None
+    if fair_mode:
+        legacy_totals = run_allocation(1.0, 1.0, 1.0, True, LEGACY_SS_PCT)[0]
 
     # 6. DATA INTEGRITY & BREAKDOWN CHECKS
     st.markdown("---")
@@ -344,6 +409,39 @@ try:
     if not np.isclose(explicit_sales, total_marketing_sales, atol=1):
         st.warning(
             "⚠️ Control Check Notice: Discrepancy detected between explicit master brand filter and final distribution.")
+
+    # ---------------------------------------------------------
+    # FAIRNESS IMPACT (LEGACY vs FAIR)
+    # ---------------------------------------------------------
+    if fair_mode and legacy_totals is not None:
+        with st.expander("⚖️ View Fairness Impact (Legacy vs Fair)"):
+            st.caption(
+                "Compares each person's allocated Contribution Margin / Operating Profit under the original equal-split "
+                "method (10% Shared Service pool) vs the current Fair settings. Total marketing value is unchanged; only who receives it moves.")
+            impact_rows = []
+            for name, fair_v in person_totals_raw.items():
+                leg_v = legacy_totals.get(name, {'CM': 0.0, 'OP': 0.0})
+                d_cm = fair_v['CM'] - leg_v['CM']
+                impact_rows.append({
+                    'Name': name,
+                    'Role': role_lookup.get(name, ROLE_PILLAR),
+                    'CM (Legacy)': leg_v['CM'],
+                    'CM (Fair)': fair_v['CM'],
+                    'Delta CM': d_cm,
+                    'Delta CM %': (d_cm / abs(leg_v['CM']) * 100) if leg_v['CM'] else 0.0,
+                    'OP (Legacy)': leg_v['OP'],
+                    'OP (Fair)': fair_v['OP'],
+                    'Delta OP': fair_v['OP'] - leg_v['OP']
+                })
+            df_impact = pd.DataFrame(impact_rows).sort_values('Delta CM')
+            st.dataframe(
+                df_impact.style.format({
+                    'CM (Legacy)': 'Rp {:,.0f}', 'CM (Fair)': 'Rp {:,.0f}', 'Delta CM': 'Rp {:,.0f}',
+                    'Delta CM %': '{:+.1f}%',
+                    'OP (Legacy)': 'Rp {:,.0f}', 'OP (Fair)': 'Rp {:,.0f}', 'Delta OP': 'Rp {:,.0f}'
+                }),
+                use_container_width=True, hide_index=True
+            )
 
     # ---------------------------------------------------------
     # ACTIVE SCOPE BREAKDOWN (SALES AUDIT TRAIL) WITH EXPANDER
@@ -398,6 +496,7 @@ try:
 
         results.append({
             'Name': name,
+            'Role': role_lookup.get(name, ROLE_PILLAR),
             y_metric: chosen_score,
             'Sales': data['Sales'],
             'Contribution Margin': data['CM'],
@@ -412,6 +511,32 @@ try:
 
     total_persons = len(df_res)
 
+    # SYNC CHECK: People Score and Adjusted People Score must rank people the same way
+    sync_df = pd.DataFrame([{'Name': n, 'People Score (1-3)': v[0], 'Adjusted (1-10)': v[1]}
+                            for n, v in score_lookup.items()])
+    sync_df = sync_df[(sync_df['People Score (1-3)'] > 0) & (sync_df['Adjusted (1-10)'] > 0)].reset_index(drop=True)
+    if len(sync_df) > 1:
+        sc_vals = sync_df['People Score (1-3)'].values
+        ad_vals = sync_df['Adjusted (1-10)'].values
+        bad_pairs = (sc_vals[:, None] > sc_vals[None, :]) & (ad_vals[:, None] <= ad_vals[None, :])
+        n_bad = int(bad_pairs.sum())
+        if n_bad:
+            st.warning(
+                f"⚠️ People Score Sync Check: {n_bad} pair(s) of people have a higher original People Score "
+                "but an equal or lower Adjusted People Score. Re-calculate the Adjusted score in the source file.")
+            with st.expander("🔎 View inconsistent pairs"):
+                bi, bj = np.where(bad_pairs)
+                pair_rows = [{
+                    'Higher original score': sync_df.loc[i, 'Name'],
+                    'Score': sync_df.loc[i, 'People Score (1-3)'], 'Adjusted': sync_df.loc[i, 'Adjusted (1-10)'],
+                    'Lower original score': sync_df.loc[j, 'Name'],
+                    'Score (lower)': sync_df.loc[j, 'People Score (1-3)'],
+                    'Adjusted (lower)': sync_df.loc[j, 'Adjusted (1-10)']
+                } for i, j in zip(bi[:50], bj[:50])]
+                st.dataframe(pd.DataFrame(pair_rows), use_container_width=True, hide_index=True)
+        else:
+            st.caption("✅ People Score sync check passed: Adjusted score ranks people consistently with the original score.")
+
     # Initialize Adjusted Contribution Margin (Base is CM)
     df_res['Adjusted Contribution Margin'] = df_res['Contribution Margin']
 
@@ -424,15 +549,25 @@ try:
         f"💡 **X-Axis** is mapping to **{x_metric}**. **Y-Axis** is mapping to **{y_metric}**. Bubble size visualizes Sales.")
 
     # Dynamic default thresholds based on scale for Y-Axis (People Score)
+    # Both scales use the same People band policy (High from 2.5, Low below 1.75 on the 1-3 scale).
+    # The engine tests High with ">" so the High cut-off sits just below the first High score:
+    #   1-3 scale : Low < 1.75  | High > 2.25 (i.e. scores 2.5 and 3.0)
+    #   1-10 scale: Low < 4.6   | High > 6.4  (lower edges of the 2.0 and 2.5 score bands)
     if "Adjusted" in y_metric:
-        y_low_default = 4.0
-        y_high_default = 7.0
+        y_low_default = 4.6
+        y_high_default = 6.4
     else:
-        y_low_default = 1.5
-        y_high_default = 2.5
+        y_low_default = 1.75
+        y_high_default = 2.25
 
     # X-Axis is now Financial Output
-    mid_x = df_res[x_metric].mean() if df_res[x_metric].sum() > 0 else 1000000.0
+    # Fair mode: thresholds come from direct/category owners so common roles cannot skew the cut-offs
+    ref_df = df_res
+    if fair_mode:
+        core_mask = df_res['Role'].isin([ROLE_DIRECT, ROLE_CATEGORY])
+        if core_mask.any():
+            ref_df = df_res[core_mask]
+    mid_x = ref_df[x_metric].mean() if ref_df[x_metric].sum() > 0 else 1000000.0
     step_x = 1000000.0
 
     col_t1, col_t2, col_t3, col_t4 = st.columns(4)
@@ -521,7 +656,7 @@ try:
     }
 
     # Dynamic Hover Data
-    hover_dict = {'Bubble_Size': False, 'Sales': ':,.0f'}
+    hover_dict = {'Bubble_Size': False, 'Role': True, 'Sales': ':,.0f'}
     if x_metric == "Adjusted Contribution Margin":
         hover_dict['Contribution Margin'] = ':,.0f'
         hover_dict['Operating Profit'] = ':,.0f'
@@ -874,7 +1009,7 @@ try:
     st.markdown("---")
     st.markdown("### 📋 Detailed Personnel Data")
 
-    export_cols = ['Name', y_metric, 'Contribution Margin', 'Operating Profit']
+    export_cols = ['Name', 'Role', y_metric, 'Contribution Margin', 'Operating Profit']
     if x_metric == 'Adjusted Contribution Margin':
         export_cols.append('Adjusted Contribution Margin')
     export_cols.extend(['Sales', '9-Box Category'])
